@@ -168,6 +168,10 @@ pub struct ChallengeEnv {
   pub privileged: Option<bool>,
   pub images: Vec<ChallengeImage>,
   pub pull_secret: Option<String>,
+
+  /// Per-challenge node selector (overrides game and platform defaults)
+  #[serde(default)]
+  pub node_selector: Option<String>,
 }
 
 impl ChallengeImage {
@@ -193,6 +197,7 @@ impl ChallengeEnv {
       privileged: None,
       images: self.images.into_iter().map(|i| i.desensitize()).collect(),
       pull_secret: None,
+      node_selector: None,
     }
   }
 }
@@ -329,6 +334,7 @@ mod tests {
       privileged: Some(true),
       images: vec![image("web")],
       pull_secret: Some("registry-secret".to_owned()),
+      node_selector: Some("gpu".to_owned()),
     }
     .desensitize();
 
@@ -336,6 +342,7 @@ mod tests {
     assert_eq!(desensitized.restricted, None);
     assert_eq!(desensitized.privileged, None);
     assert_eq!(desensitized.pull_secret, None);
+    assert_eq!(desensitized.node_selector, None);
     assert_eq!(desensitized.images.len(), 1);
     assert_eq!(desensitized.images[0].tag, "ret.sh.cn/shadowed:latest");
     assert_eq!(desensitized.images[0].cpu, 0.0);

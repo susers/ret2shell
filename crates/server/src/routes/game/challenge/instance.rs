@@ -177,10 +177,18 @@ pub(super) async fn start_challenge_instance(
       .await?;
     debug!(?env_map);
     debug!(?game);
+    // challenge > game > platform (challenge only active when game is archived)
     let node_selector = if game.archive_at > Utc::now() {
-      game.node_selector.clone().or(config.node_selector.clone())
+      env_config
+        .node_selector
+        .clone()
+        .or(game.node_selector.clone())
+        .or(config.node_selector.clone())
     } else {
-      config.node_selector.clone()
+      env_config
+        .node_selector
+        .clone()
+        .or(config.node_selector.clone())
     }
     .filter(|ns| !ns.is_empty());
 

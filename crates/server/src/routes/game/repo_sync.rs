@@ -1137,6 +1137,7 @@ mod tests {
       privileged: Some(false),
       images,
       pull_secret: Some("registry-secret".to_owned()),
+      node_selector: None,
     }
   }
 
