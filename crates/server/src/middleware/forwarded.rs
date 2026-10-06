@@ -337,15 +337,31 @@ pub async fn ip_record(
   Ok(next.run(req).await)
 }
 
+/// A [`KeyExtractor`] that uses user ID for authenticated requests,
+/// falling back to IP address.
+///
+/// This provides better rate limiting isolation in NAT environments where
+/// multiple users share the same public IP address. Authenticated users get
+/// per-user limits, while unauthenticated requests (login, register, etc.)
+/// are still limited by IP.
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq)]
-pub struct ProxiedIpExtractor;
+pub struct HybridUserOrIpExtractor;
 
-impl KeyExtractor for ProxiedIpExtractor {
+impl KeyExtractor for HybridUserOrIpExtractor {
   type Key = String;
 
   fn extract<B>(&self, req: &Request<B>) -> Result<Self::Key, GovernorError> {
+    // Try to extract user ID from token first (for authenticated requests)
+    if let Some(token) = req.extensions().get::<Token>()
+      && token.id != 0
+    {
+      // Use "u:{user_id}" prefix to distinguish user-based keys from IP keys
+      return Ok(format!("u:{}", token.id));
+    }
+
+    // Fall back to IP for unauthenticated requests or invalid tokens
     let ip = get_client_ip(req).ok_or(GovernorError::UnableToExtractKey)?;
-    Ok(ip.to_string())
+    Ok(format!("ip:{}", ip))
   }
 }
 
@@ -371,11 +387,13 @@ mod tests {
     extract::ConnectInfo,
     http::{HeaderMap, Request, header::FORWARDED},
   };
+  use r2s_database::user::Permissions;
 
   use super::{
-    ForwardedHeaderValue, ForwardedHeaderValueParseError, ForwardedStanza, Identifier, Protocol,
-    X_FORWARDED_FOR, X_REAL_IP, get_client_ip,
+    ForwardedHeaderValue, ForwardedHeaderValueParseError, ForwardedStanza, HybridUserOrIpExtractor,
+    Identifier, Protocol, X_FORWARDED_FOR, X_REAL_IP, get_client_ip,
   };
+  use crate::middleware::auth::Token;
 
   fn request_with_headers(headers: HeaderMap) -> Request<()> {
     let mut request = Request::builder().uri("/").body(()).unwrap();
@@ -482,5 +500,66 @@ mod tests {
       get_client_ip(&request),
       Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
     );
+  }
+
+  #[test]
+  fn hybrid_extractor_uses_user_id_when_authenticated() {
+    use axum::http::Request;
+    use tower_governor::key_extractor::KeyExtractor;
+
+    let mut req = Request::builder().body(()).unwrap();
+    // Simulate an authenticated user with token ID 123
+    req.extensions_mut().insert(Token {
+      id: 123,
+      account: "alice".to_string(),
+      nickname: "Alice".to_string(),
+      permissions: Permissions::default(),
+      exp: 0,
+    });
+
+    let extractor = HybridUserOrIpExtractor;
+    let key = extractor.extract(&req).unwrap();
+    assert_eq!(key, "u:123");
+  }
+
+  #[test]
+  fn hybrid_extractor_falls_back_to_ip_for_unauthenticated() {
+    use axum::http::Request;
+    use tower_governor::key_extractor::KeyExtractor;
+
+    let mut req = Request::builder().body(()).unwrap();
+    // No token in extensions -
+    // unauthenticated request, but needs ConnectInfo for IP fallback
+    req
+      .extensions_mut()
+      .insert(ConnectInfo(SocketAddr::from((Ipv4Addr::LOCALHOST, 8080))));
+
+    let extractor = HybridUserOrIpExtractor;
+    let key = extractor.extract(&req).unwrap();
+    assert!(key.starts_with("ip:"));
+    assert!(key.contains("127.0.0.1"));
+  }
+
+  #[test]
+  fn hybrid_extractor_treats_zero_user_id_as_unauthenticated() {
+    use axum::http::Request;
+    use tower_governor::key_extractor::KeyExtractor;
+
+    let mut req = Request::builder().body(()).unwrap();
+    // Token with id=0 means not logged in
+    req.extensions_mut().insert(Token {
+      id: 0,
+      account: String::new(),
+      nickname: String::new(),
+      permissions: Permissions::default(),
+      exp: 0,
+    });
+    req
+      .extensions_mut()
+      .insert(ConnectInfo(SocketAddr::from((Ipv4Addr::LOCALHOST, 8080))));
+
+    let extractor = HybridUserOrIpExtractor;
+    let key = extractor.extract(&req).unwrap();
+    assert!(key.starts_with("ip:"));
   }
 }

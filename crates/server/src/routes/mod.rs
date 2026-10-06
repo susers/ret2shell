@@ -26,7 +26,7 @@ use crate::{
     self,
     auth::{create_auth_header_by_user_agent, extract_user_info},
     codec,
-    forwarded::{MakeRequestNanoId, ProxiedIpExtractor, ip_record},
+    forwarded::{HybridUserOrIpExtractor, MakeRequestNanoId, ip_record},
   },
   traits::{GlobalState, ResponseError},
 };
@@ -143,7 +143,7 @@ fn construct_router(state: &GlobalState) -> Router<GlobalState> {
       GovernorConfigBuilder::default()
         .per_millisecond(config.burst_restore_rate.unwrap_or(500))
         .burst_size(config.burst_limit.unwrap_or(32))
-        .key_extractor(ProxiedIpExtractor)
+        .key_extractor(HybridUserOrIpExtractor)
         .use_headers()
         .finish()
         .unwrap(),
