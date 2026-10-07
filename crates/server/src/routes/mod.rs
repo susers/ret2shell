@@ -11,6 +11,7 @@ use axum::{
   routing::get,
 };
 use r2s_config::server;
+use r2s_database::user::Permission;
 use tower::{ServiceBuilder, buffer::BufferLayer};
 use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use tower_http::{
@@ -27,6 +28,7 @@ use crate::{
     auth::{create_auth_header_by_user_agent, extract_user_info},
     codec,
     forwarded::{HybridUserOrIpExtractor, MakeRequestNanoId, ip_record},
+    metrics::MetricsLayer,
   },
   traits::{GlobalState, ResponseError},
 };
@@ -46,6 +48,33 @@ mod wiki;
 
 mod web;
 
+use axum::Extension;
+
+use crate::middleware::auth::Token;
+
+/// Wrapper handler for /metrics that checks DevOps permission.
+/// This runs AFTER extract_user_info populates the Token extension.
+async fn metrics_handler_with_auth(
+  Extension(token): Extension<Token>, State(state): State<GlobalState>,
+) -> Result<impl IntoResponse, ResponseError> {
+  if token.id <= 0 {
+    return Err(ResponseError::Unauthorized("please login first".to_owned()));
+  }
+  if !token.permissions.0.contains(&Permission::DevOps) {
+    tracing::warn!(
+      user_id = token.id,
+      account = %token.account,
+      "metrics access denied: no DevOps permission"
+    );
+    return Err(ResponseError::Forbidden(
+      "DevOps permission required".to_owned(),
+    ));
+  }
+
+  let metrics = state.metrics.clone();
+  Ok(crate::middleware::metrics::metrics_handler(Arc::new(metrics)).await)
+}
+
 pub async fn run_post_receive(
   session_id: &str, auth_key: &str, base_url: &str, repo_path: &std::path::Path,
 ) -> anyhow::Result<()> {
@@ -58,7 +87,12 @@ pub async fn initialize(
   let config = config.ok_or(anyhow::anyhow!("missing server config"))?;
   let api_base_path = &config.api_base_path;
   let cors_origins = &config.cors_origins;
+
+  // Get metrics reference before moving state
+  let metrics = Arc::new(state.metrics.clone());
   let api_router = construct_router(&state);
+
+  // Build main router with all routes (including /api/metrics)
   let router = Router::new()
     .nest(api_base_path, api_router)
     .route_layer(from_fn_with_state(
@@ -77,12 +111,17 @@ pub async fn initialize(
         ),
     )
     .merge(web::router(&state))
-    .with_state::<()>(state);
+    .with_state(state);
+
+  // Add metrics tracking layer (tracks all requests across all routes)
+  let router = router.layer(MetricsLayer { metrics });
+
   Ok(router)
 }
 
 fn construct_router(state: &GlobalState) -> Router<GlobalState> {
-  let route = Router::new()
+  // Build API routes including /metrics
+  let api_route = Router::new()
     .nest("/account", account::router(state))
     .nest("/bulletin", bulletin::router(state))
     .nest("/calendar", calendar::router(state))
@@ -97,8 +136,9 @@ fn construct_router(state: &GlobalState) -> Router<GlobalState> {
     .nest("/rpc", rpc::router(state))
     .nest("/traffic", traffic::router(state))
     .route("/ping", get(ping))
-    .route_layer(from_fn_with_state(state.clone(), ip_record))
+    .route("/metrics", get(metrics_handler_with_auth))
     .route_layer(from_fn_with_state(state.clone(), extract_user_info))
+    .route_layer(from_fn_with_state(state.clone(), ip_record))
     .route_layer(from_fn(create_auth_header_by_user_agent))
     .layer(
       TraceLayer::new_for_http()
@@ -138,7 +178,8 @@ fn construct_router(state: &GlobalState) -> Router<GlobalState> {
         }),
     );
 
-  let route = if let Some(config) = state.config.server.clone().unwrap_or_default().rate_limit {
+  // Apply rate limiting
+  let api_route = if let Some(config) = state.config.server.clone().unwrap_or_default().rate_limit {
     let governor_conf = Arc::new(
       GovernorConfigBuilder::default()
         .per_millisecond(config.burst_restore_rate.unwrap_or(500))
@@ -151,7 +192,6 @@ fn construct_router(state: &GlobalState) -> Router<GlobalState> {
 
     let governor_limiter = governor_conf.limiter().clone();
     let interval = Duration::from_secs(60);
-    // a separate background task to clean up
     tokio::spawn(async move {
       loop {
         tokio::time::sleep(interval).await;
@@ -160,12 +200,12 @@ fn construct_router(state: &GlobalState) -> Router<GlobalState> {
       }
     });
 
-    route.layer(GovernorLayer::new(governor_conf))
+    api_route.layer(GovernorLayer::new(governor_conf))
   } else {
-    route
+    api_route
   };
 
-  route.layer(
+  api_route.layer(
     ServiceBuilder::new()
       .set_x_request_id(MakeRequestNanoId)
       .propagate_x_request_id()
