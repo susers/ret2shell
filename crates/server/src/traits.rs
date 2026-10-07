@@ -40,6 +40,7 @@ pub struct GlobalState {
   pub checker: Checker,
   pub event: EventManager,
   pub version: String,
+  pub metrics: crate::middleware::metrics::MetricsRegistry,
 }
 
 #[derive(Debug, Error)]

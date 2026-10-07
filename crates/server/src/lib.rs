@@ -96,6 +96,10 @@ pub async fn up(config: GlobalConfig) -> anyhow::Result<()> {
   info!("setup panic event handler...");
   push_panic_event(queue.clone()).await;
 
+  // Initialize metrics registry
+  let metrics = crate::middleware::metrics::MetricsRegistry::default();
+  info!("metrics registry initialized");
+
   let state = GlobalState {
     config: config.clone(),
     requestor: hyper_util::client::legacy::Client::<(), ()>::builder(TokioExecutor::new())
@@ -112,6 +116,7 @@ pub async fn up(config: GlobalConfig) -> anyhow::Result<()> {
     checker,
     media,
     version: R2S_VERSION.to_string(),
+    metrics: metrics.clone(),
   };
   info!("modules loaded, constructing router...");
 
