@@ -12,6 +12,11 @@ start_at                   = 1713630263
 team_size                  = 1
 weight                     = 3
 
+# Git mirror configuration (optional)
+# After each successful push to ret2shell, the repository will be mirrored to this URL
+# The mirror push is best-effort - failures are logged but don't block the main sync
+# mirror_url = "https://github.com/example/game-mirror.git"
+
 [access_policy]
 sync = 0
 

@@ -124,6 +124,7 @@ pub struct GameConfig {
   pub can_register_after_started: bool,
   pub award_rate: i32,
   pub weight: i32,
+  pub mirror_url: Option<String>,
 }
 
 impl GameBucket {

@@ -431,7 +431,57 @@ async fn execute_post_receive(
   }
   schedule_game_repo_index_refresh(&state, game.id, &session.game_bucket).await;
 
+  // Mirror push is best-effort - only attempt if configured and main sync
+  // succeeded
+  if let Ok(game_config) = game_bucket.config().await
+    && let Some(mirror_url) = &game_config.mirror_url
+  {
+    if let Err(err) = push_to_mirror(&game_bucket, mirror_url, &logger).await {
+      logger
+        .warn(format!("Mirror push failed (best-effort, ignored): {err}"))
+        .await;
+    } else {
+      logger.info("Repository mirrored successfully.").await;
+    }
+  }
+
   Ok(())
+}
+
+/// Pushes the repository to a configured mirror URL.
+/// This is a best-effort operation - failures are logged but don't block the
+/// sync.
+async fn push_to_mirror(
+  game_bucket: &GameBucket, mirror_url: &str, logger: &StreamLogger,
+) -> anyhow::Result<()> {
+  use std::process::Stdio;
+
+  use tokio::process::Command;
+
+  logger
+    .detail(format!("Pushing to mirror: {}", mirror_url))
+    .await;
+
+  let output = Command::new("git")
+    .current_dir(game_bucket.git.path())
+    .arg("push")
+    .arg("--mirror")
+    .arg(mirror_url)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
+
+  if output.status.success() {
+    Ok(())
+  } else {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(anyhow::anyhow!(
+      "git push --mirror failed: {}",
+      stderr.trim()
+    ))
+  }
 }
 
 async fn synchronize_repository(
